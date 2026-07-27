@@ -55,7 +55,7 @@ $exists = az group exists --name $ResourceGroup @subArgs 2>$null
 if ($LASTEXITCODE -ne 0) {
     # Check for errors (user not logged in, invalid subscription, etc.)
     Write-Warn "Failed to check if resource group '$ResourceGroup' exists. Verify 'az login' and subscription."
-    exit 1
+    throw "Azure CLI failed while checking whether resource group '$ResourceGroup' exists (exit code $LASTEXITCODE)."
 }
 if ($exists -ne 'true') {
     Write-Info "Resource group '$ResourceGroup' does not exist. Nothing to delete."

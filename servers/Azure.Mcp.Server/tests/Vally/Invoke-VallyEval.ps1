@@ -104,24 +104,6 @@ Optional filter: only run experiments whose tool name matches (e.g.
 '.experiment.yaml' suffix. Supports wildcards (e.g. 'eventhub-*'). Repeatable.
 When omitted, all tools are run.
 
-.PARAMETER PreEvalScript
-Optional path to a provisioning script run BEFORE the experiments of an area (e.g.
-./eventhubs/New-EventHubsResources.ps1). Use it to create the Azure resources the
-eval prompts reference. -ResourceGroup and -Subscription are forwarded to it.
-
-If not specified (and -SkipProvisioning is not set), the runner auto-discovers a
-convention-named `New-*Resources.ps1` script in each area directory and uses that.
-
-.PARAMETER PostEvalScript
-Optional path to a teardown script run AFTER an area's experiments (e.g.
-./eventhubs/Remove-EventHubsResources.ps1). It runs in a finally block, so it
-executes even if the run or the pre-eval provisioning fails. -ResourceGroup and
--Subscription are forwarded to it.
-
-If not specified (and -SkipProvisioning is not set), the runner auto-discovers a
-convention-named `Remove-*Resources.ps1` script in each area directory and uses
-that.
-
 .PARAMETER SkipProvisioning
 Do not run (or auto-discover) any pre/post provisioning scripts. Use this when the
 Azure resources already exist and should be left untouched.
@@ -224,7 +206,7 @@ if ($ReportFrom) {
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-# Repo root is five levels up: servers/Azure.Mcp.Server/tests/Vally -> repo root
+# Repo root is four levels up: servers/Azure.Mcp.Server/tests/Vally -> repo root
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..' '..' '..' '..')
 $ServerProject = Join-Path $RepoRoot 'servers' 'Azure.Mcp.Server' 'src' 'Azure.Mcp.Server.csproj'
 
