@@ -7,8 +7,8 @@ Provisions the Azure Event Hubs resources used by the vally "get Event Hub"
 evaluation (eventhub-get.eval.yaml and namespace-get.eval.yaml).
 
 .DESCRIPTION
-Creates - and is safe to re-run against - the resources that the eval prompts
-reference:
+Deploys eventhubs-resources.bicep, which creates - and is safe to re-run
+against - the resources that the eval prompts reference:
 
   - a resource group (default: contoso-rg), tagged with `DeleteAfter` so the
     Azure clean-up tooling always removes it even if teardown is skipped,
@@ -16,7 +16,9 @@ reference:
   - several event hubs (including "orders", which one prompt asks for by name),
     with a couple of consumer groups on the "orders" hub.
 
-Uses the Azure CLI (`az`). Sign in first with `az login`.
+Uses the Azure CLI (`az`) to run a subscription-scoped Bicep deployment, which
+creates the resource group and everything inside it in a single deployment.
+Sign in first with `az login`.
 
 The companion Remove-EventHubsResources.ps1 deletes the resource group. As a
 belt-and-braces safety net, the `DeleteAfter` tag added here guarantees the group
@@ -94,55 +96,41 @@ Write-Info "Using subscription: $($account.name) ($($account.id))"
 # (round-trip 'o') UTC timestamp that the resource clean-up job honors.
 $deleteAfter = [DateTime]::UtcNow.AddHours($DeleteAfterHours).ToString('o')
 
-Write-Info "Creating resource group '$ResourceGroup' in '$Location' (DeleteAfter=$deleteAfter) ..."
-az group create `
-    --name $ResourceGroup `
-    --location $Location `
-    --tags "DeleteAfter=$deleteAfter" "Purpose=vally-eval" `
-    @subArgs | Out-Null
-Assert-Az "create resource group '$ResourceGroup'"
+$templateFile = Join-Path $PSScriptRoot 'eventhubs-resources.bicep'
+$deploymentName = "eventhubs-vally-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
 
-Write-Info "Creating Event Hubs namespace '$Namespace' (Standard) ..."
-# --disable-local-auth true: SAS/local auth is blocked by the Safe Secrets Standard
-# policy in many subscriptions. The Azure MCP tools authenticate with Entra ID
-# (AzureCliCredential), so disabling local auth keeps the namespace both
-# policy-compliant and fully usable by the eval.
-az eventhubs namespace create `
-    --resource-group $ResourceGroup `
-    --name $Namespace `
-    --location $Location `
-    --sku Standard `
-    --disable-local-auth true `
-    --tags "DeleteAfter=$deleteAfter" "Purpose=vally-eval" `
-    @subArgs | Out-Null
-Assert-Az "create Event Hubs namespace '$Namespace'"
-
-foreach ($hub in $EventHubs) {
-    Write-Info "Creating event hub '$hub' ..."
-    az eventhubs eventhub create `
-        --resource-group $ResourceGroup `
-        --namespace-name $Namespace `
-        --name $hub `
-        --partition-count 2 `
-        --cleanup-policy Delete `
-        --retention-time-in-hours 24 `
-        @subArgs | Out-Null
-    Assert-Az "create event hub '$hub'"
-}
-
-# Add a couple of consumer groups to the "orders" hub so the resource looks
-# realistic (the eval asks for its details).
-if ($EventHubs -contains 'orders') {
-    foreach ($cg in @('billing', 'analytics')) {
-        Write-Info "Creating consumer group '$cg' on event hub 'orders' ..."
-        az eventhubs eventhub consumer-group create `
-            --resource-group $ResourceGroup `
-            --namespace-name $Namespace `
-            --eventhub-name orders `
-            --name $cg `
-            @subArgs | Out-Null
-        Assert-Az "create consumer group '$cg' on event hub 'orders'"
+# Bicep params are passed as a single JSON parameters file so the array-typed
+# eventHubNames parameter survives Azure CLI's argument parsing unambiguously.
+$parameters = @{
+    '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+    contentVersion = '1.0.0.0'
+    parameters     = @{
+        resourceGroupName = @{ value = $ResourceGroup }
+        location          = @{ value = $Location }
+        namespaceName     = @{ value = $Namespace }
+        eventHubNames     = @{ value = $EventHubs }
+        deleteAfter       = @{ value = $deleteAfter }
     }
+} | ConvertTo-Json -Depth 5 -Compress
+
+$parametersFile = New-TemporaryFile
+try {
+    Set-Content -Path $parametersFile -Value $parameters -NoNewline
+
+    Write-Info "Deploying Event Hubs resources via Bicep (resource group '$ResourceGroup', namespace '$Namespace', DeleteAfter=$deleteAfter) ..."
+    $deployment = az deployment sub create `
+        --name $deploymentName `
+        --location $Location `
+        --template-file $templateFile `
+        --parameters "@$parametersFile" `
+        @subArgs | ConvertFrom-Json
+    Assert-Az "deploy eventhubs-resources.bicep"
+}
+finally {
+    Remove-Item -Path $parametersFile -Force -ErrorAction SilentlyContinue
 }
 
-Write-Info "Provisioning complete. Resource group '$ResourceGroup' will auto-delete after $deleteAfter if not removed sooner."
+$provisionedNamespace = $deployment.properties.outputs.namespaceName.value
+$provisionedResourceGroup = $deployment.properties.outputs.resourceGroupName.value
+
+Write-Info "Provisioning complete. Resource group '$provisionedResourceGroup' (namespace '$provisionedNamespace') will auto-delete after $deleteAfter if not removed sooner."

@@ -120,8 +120,10 @@ still cannot.
 The eval prompts reference concrete resources (resource group `contoso-rg`,
 namespace `contoso-ehns`, event hub `orders`). Two scripts create and remove them:
 
-- **`eventhubs/New-EventHubsResources.ps1`** - creates the resource group, the
-  Event Hubs namespace, and the event hubs (including `orders`). It stamps a
+- **`eventhubs/New-EventHubsResources.ps1`** - deploys
+  `eventhubs/eventhubs-resources.bicep` (a subscription-scoped Bicep template,
+  via `az deployment sub create`) to create the resource group, the Event Hubs
+  namespace, and the event hubs (including `orders`). It stamps a
   **`DeleteAfter`** tag (an ISO 8601 UTC timestamp, matching the repo's
   `TestResources` convention) on the resource group so the standard Azure
   clean-up job reclaims it **even if teardown never runs**.
