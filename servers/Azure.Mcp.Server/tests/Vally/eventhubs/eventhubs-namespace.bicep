@@ -17,6 +17,12 @@ param eventHubNames array
 @description('Consumer groups to create on the "orders" event hub, if present in eventHubNames.')
 param ordersConsumerGroups array
 
+@description('Name of a disposable event hub reserved for the eventhub-delete eval to delete. Empty string skips it.')
+param deletableEventHubName string = ''
+
+@description('Name of a disposable consumer group on the "orders" hub reserved for the consumergroup-delete eval to delete. Empty string skips it.')
+param deletableConsumerGroupName string = ''
+
 var hasOrders = contains(eventHubNames, 'orders')
 var otherEventHubNames = filter(eventHubNames, name => name != 'orders')
 
@@ -62,5 +68,25 @@ resource ordersConsumerGroupResources 'Microsoft.EventHub/namespaces/eventhubs/c
   parent: ordersHub
   name: cg
 }]
+
+// Reserved for the eventhub-delete eval so it has something disposable to
+// delete without disturbing "orders"/"payments"/"shipments", which the
+// get/update evals depend on.
+resource deletableEventHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = if (!empty(deletableEventHubName)) {
+  parent: eventHubsNamespace
+  name: deletableEventHubName
+  properties: {
+    partitionCount: 2
+    messageRetentionInDays: 1
+  }
+}
+
+// Reserved for the consumergroup-delete eval so it has something disposable
+// to delete without disturbing "billing"/"analytics", which the
+// consumergroup-get/update evals depend on.
+resource deletableConsumerGroup 'Microsoft.EventHub/namespaces/eventhubs/consumergroups@2024-01-01' = if (hasOrders && !empty(deletableConsumerGroupName)) {
+  parent: ordersHub
+  name: deletableConsumerGroupName
+}
 
 output namespaceName string = eventHubsNamespace.name

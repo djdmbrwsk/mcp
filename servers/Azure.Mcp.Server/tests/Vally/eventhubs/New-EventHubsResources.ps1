@@ -14,7 +14,13 @@ against - the resources that the eval prompts reference:
     Azure clean-up tooling always removes it even if teardown is skipped,
   - an Event Hubs namespace (default: contoso-ehns), and
   - several event hubs (including "orders", which one prompt asks for by name),
-    with a couple of consumer groups on the "orders" hub.
+    with a couple of consumer groups on the "orders" hub,
+  - a disposable event hub ("contoso-temp-hub") and a disposable consumer
+    group on "orders" ("contoso-temp-cg"), reserved for the eventhub-delete
+    and consumergroup-delete evals so they have something to delete without
+    disturbing the resources the other evals depend on, and
+  - a second, minimal Event Hubs namespace ("contoso-ehns-delete"), reserved
+    for the namespace-delete eval to delete.
 
 Uses the Azure CLI (`az`) to run a subscription-scoped Bicep deployment, which
 creates the resource group and everything inside it in a single deployment.

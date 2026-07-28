@@ -499,8 +499,8 @@ This file contains prompts used for end-to-end testing to ensure each tool is in
 | eventhubs_namespace_delete | Delete my namespace <namespace_name> in my resource group <resource_group_name> |
 | eventhubs_namespace_get | List all Event Hubs namespaces in my subscription |
 | eventhubs_namespace_get | Get the details of my namespace <namespace_name> in my resource group <resource_group_name> |
-| eventhubs_namespace_update | Create an new namespace <namespace_name> in my resource group <resource_group_name> |
-| eventhubs_namespace_update | Update my namespace <namespace_name> in my resource group <resource_group_name>|
+| eventhubs_namespace_update | Create a new namespace <namespace_name> in my resource group <resource_group_name> in the <location> region using the <sku_name> SKU |
+| eventhubs_namespace_update | Update my namespace <namespace_name> in my resource group <resource_group_name> to use the <sku_name> SKU with a capacity of <sku_capacity> |
 
 ## Azure File Shares
 

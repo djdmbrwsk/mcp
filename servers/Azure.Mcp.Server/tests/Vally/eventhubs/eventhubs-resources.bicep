@@ -37,6 +37,15 @@ param ordersConsumerGroups array = [
   'analytics'
 ]
 
+@description('Name of a disposable event hub reserved for the eventhub-delete eval. Empty string skips it.')
+param deletableEventHubName string = 'contoso-temp-hub'
+
+@description('Name of a disposable consumer group on the "orders" hub reserved for the consumergroup-delete eval. Empty string skips it.')
+param deletableConsumerGroupName string = 'contoso-temp-cg'
+
+@description('Name of a second, disposable Event Hubs namespace reserved for the namespace-delete eval to delete. Empty string skips it.')
+param deletableNamespaceName string = 'contoso-ehns-delete'
+
 @description('ISO 8601 UTC timestamp stamped as a DeleteAfter safety tag, honored by the repo cleanup job.')
 param deleteAfter string
 
@@ -63,9 +72,29 @@ module eventHubsResources 'eventhubs-namespace.bicep' = {
     tags: tags
     eventHubNames: eventHubNames
     ordersConsumerGroups: ordersConsumerGroups
+    deletableEventHubName: deletableEventHubName
+    deletableConsumerGroupName: deletableConsumerGroupName
+  }
+}
+
+// A second, minimal Event Hubs namespace reserved for the namespace-delete
+// eval so it has something disposable to delete without touching the primary
+// `namespaceName` namespace, which the other evals depend on.
+module deletableNamespaceResources 'eventhubs-namespace.bicep' = if (!empty(deletableNamespaceName)) {
+  name: 'eventHubsDeletableNamespaceDeployment'
+  scope: rg
+  params: {
+    namespaceName: deletableNamespaceName
+    location: location
+    tags: tags
+    eventHubNames: []
+    ordersConsumerGroups: []
   }
 }
 
 output resourceGroupName string = rg.name
 output namespaceName string = eventHubsResources.outputs.namespaceName
 output eventHubNames array = eventHubNames
+output deletableNamespaceName string = deletableNamespaceName
+output deletableEventHubName string = deletableEventHubName
+output deletableConsumerGroupName string = deletableConsumerGroupName

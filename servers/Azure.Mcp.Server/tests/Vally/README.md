@@ -30,9 +30,11 @@ removed (e.g. `eventhub-get`). Each area can hold many tools (e.g. `eventhub-get
 `namespace-get`, etc.), each an independent experiment. Provisioning scripts are
 discovered **per area** and run once for all of that area's tools.
 
-The first area, `eventhubs/`, evaluates the **get Event Hub** tool
-(`eventhubs_eventhub_get`). Its `eventhub-get.experiment.yaml` runs the shared
-`eventhub-get.eval.yaml` as three variants that differ only in whether (and how)
+The first area, `eventhubs/`, evaluates every Event Hubs tool
+(`eventhubs_namespace_get`/`_update`/`_delete`, `eventhubs_eventhub_get`/`_update`/`_delete`,
+and `eventhubs_eventhub_consumergroup_get`/`_update`/`_delete`) - one
+`<tool>.experiment.yaml` per tool. Each experiment runs its shared
+`<tool>.eval.yaml` as three variants that differ only in whether (and how)
 the Azure MCP server is present:
 
 - **namespace**: the agent has the Azure MCP Event Hubs tools, with the server
@@ -268,15 +270,44 @@ debugging a prior run - it's exactly how the summary logic itself is validated.
 
 ## Adding more tool evaluations
 
-No script changes are needed - the runner discovers new evals by convention:
+No script changes are needed - the runner discovers new evals by convention.
+
+### Recommended: use the `create-vally-tool-experiments` skill
+
+The fastest, most consistent way to add a new tool experiment is the
+[`create-vally-tool-experiments`](../../../../.github/skills/create-vally-tool-experiments/SKILL.md)
+skill (GitHub Copilot). Ask Copilot to create an experiment for the target
+tool (e.g. *"create vally tool experiments for the remaining eventhubs
+tools"*) and it will, per tool:
+
+- resolve the tool's full MCP name and area/tool naming (e.g.
+  `eventhubs_eventhub_delete` -> area `eventhubs`, tool `eventhub-delete`),
+- pull **every** required stimulus prompt for that tool from
+  `servers/Azure.Mcp.Server/docs/e2eTestPrompts.md` (not invented text),
+- write the `<tool>.eval.yaml` / `<tool>.experiment.yaml` pair following the
+  baseline/namespace/consolidated pattern and outcome-only grading described
+  above,
+- extend the area's existing `New-*Resources.ps1`/Bicep (or add a new pair
+  for a brand-new area) if the tool needs resources that don't already exist -
+  including disposable resources for destructive `_delete` tools so they
+  don't clobber other tools' evals, and
+- validate with `Invoke-VallyEval.ps1` and report the
+  `VALUABLE`/`REGRESSION`/`BOTH PASS`/`INCONCLUSIVE` comparison per stimulus.
+
+See the skill file for the full step-by-step process, including how it
+decides area boundaries and how it flags destructive-tool safety
+considerations in the generated YAML comments.
+
+### Manual steps
 
 1. Pick an **area** subdirectory (reuse an existing one such as `eventhubs/`, or
    create a new one named after the namespace, e.g. `storage/`).
 2. Add the shared eval spec named **`<tool>.eval.yaml`** (e.g.
    `eventhub-update.eval.yaml`) - copy `eventhubs/eventhub-get.eval.yaml` and
    adjust the prompts, the `--namespace` argument, and the `prompt`/`rubric`
-   outcome graders. Grading is outcome-only (see above), so there are no
-   tool-selection graders to maintain.
+   outcome graders. Every prompt must come from
+   `servers/Azure.Mcp.Server/docs/e2eTestPrompts.md`. Grading is outcome-only
+   (see above), so there are no tool-selection graders to maintain.
 3. Add the experiment named **`<tool>.experiment.yaml`** (e.g.
    `eventhub-update.experiment.yaml`) - copy `eventhubs/eventhub-get.experiment.yaml`,
    point its `evals:` at your new `.eval.yaml`, and keep the `baseline`,
@@ -286,6 +317,11 @@ No script changes are needed - the runner discovers new evals by convention:
    is needed - the variants are defined here.
 4. For a new area needing Azure resources, add `New-*Resources.ps1` and
    `Remove-*Resources.ps1` to that area folder (see the Event Hubs pair as a
-   template). They are discovered and run per area.
+   template). They are discovered and run per area. For a destructive
+   (`_delete`) tool in an existing area, prefer extending that area's existing
+   provisioning with a disposable, single-purpose resource (see
+   `eventhubs/eventhubs-resources.bicep`'s `deletableEventHubName`/
+   `deletableConsumerGroupName`/`deletableNamespaceName` parameters) rather
+   than deleting a resource other evals depend on.
 5. Run everything with `./Invoke-VallyEval.ps1`, or just the new one with
    `-Area <area>` / `-Tool <tool>`.
