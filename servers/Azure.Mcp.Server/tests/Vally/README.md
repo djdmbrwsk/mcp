@@ -179,36 +179,43 @@ expected). Useful switches:
 ./Invoke-VallyEval.ps1 -Iterations 3
 
 # Re-print the summary from a previous run's saved artifacts - no build, no Azure, no vally
+# (auto-discovers the newest run directory under --output-dir)
 ./Invoke-VallyEval.ps1 -ReportOnly
-# ...for a single tool, showing the newest 3 runs as iterations
+# ...for a single tool, showing the newest 3 iterations within that run as iterations
 ./Invoke-VallyEval.ps1 -ReportOnly -Tool eventhub-get -Iterations 3
-# ...from an archived/copied results tree
-./Invoke-VallyEval.ps1 -ReportFrom ./some-saved-results
+# ...from a specific, older run directory instead of the newest one
+./Invoke-VallyEval.ps1 -ReportFrom ./.vally-results/2026-07-29T18-19-30-496Z
 
 # Run one explicit experiment (its baseline variant is defined in the experiment spec)
 ./Invoke-VallyEval.ps1 -ExperimentSpec ./eventhubs/eventhub-get.experiment.yaml
 ```
 
-To run an experiment by hand (with `azmcp` already on `PATH`):
-
-```powershell
-# Runs the shared eval spec as every variant (baseline + namespace + consolidated)
-# and writes each under a timestamped subfolder of --output-dir.
-vally experiment run ./eventhubs/eventhub-get.experiment.yaml --output-dir ./.vally-results/eventhubs/eventhub-get
-```
-
 ## Results
 
-The runner writes each experiment's runs under `--output-dir` (default
-`./.vally-results`) in an `<area>/<tool>/` subdirectory. `vally experiment run`
-then creates a timestamped folder per run, with one subfolder per variant
-(`baseline`, `namespace`, and `consolidated`), each containing:
+Every invocation of `Invoke-VallyEval.ps1` writes ALL of its output under one
+fresh, timestamped **run directory**: `<output-dir>/<run-timestamp>/<area>/<tool>/...`
+(default `--output-dir` is `./.vally-results`). This groups everything a single
+invocation produces - every area/tool it discovered, and every `-Iterations`
+repeat of each - together and unambiguous, rather than scattering results
+across independent per-tool timestamps with no shared "this is one run"
+grouping. Under `<run-timestamp>/<area>/<tool>/`, `vally experiment run` then
+creates one further timestamped subfolder per iteration, with one subfolder
+per variant (`baseline`, `namespace`, and `consolidated`), each containing:
 
 - `results.jsonl` - one JSON record per stimulus (a `trial-result`, plus a final
   `run-summary`). Each `trial-result` carries the verdict (`gradeResult.passed`)
   and the efficiency metrics (`trajectory.metrics.tokenUsage.totalTokens`,
   `trajectory.metrics.turnCount`, `trajectory.metrics.wallTimeMs`), and
 - `eval-results.md` - a human-readable Markdown summary.
+
+Running an experiment by hand still targets one tool's directory directly (no
+run-timestamp level, since you're not going through the wrapper script):
+
+```powershell
+# Runs the shared eval spec as every variant (baseline + namespace + consolidated)
+# and writes each under a timestamped subfolder of --output-dir.
+vally experiment run ./eventhubs/eventhub-get.experiment.yaml --output-dir ./.vally-results/eventhubs/eventhub-get
+```
 
 ### Interpreting effectiveness
 
@@ -242,27 +249,46 @@ and do not affect it, so the script is CI-friendly.
 > `-Iterations <n>` to run each experiment multiple times; the results summary
 > reports every iteration's outcome and an aggregate pass count.
 
+### Consolidated summary (by tool)
+
+After the per-iteration results above, the script prints a **Consolidated
+Summary** section with one entry per tool. Each entry folds every iteration and
+stimulus recorded for that tool into a single set of statistics per variant
+(pass rate, and average tokens/turns/wall time/AI credits), names the
+best-performing *candidate* variant (highest pass rate first, then the most
+efficient on ties - the shared `baseline` control is reported for reference but
+never chosen as "best," since it's not a server-mode choice), and lists the
+other variants beneath it for context. This is the quickest way to answer "which
+server mode should we recommend for this tool, across everything we ran?"
+without re-reading every iteration's detail. It is produced identically whether
+the run just executed the experiments or `-ReportOnly`/`-ReportFrom` reconstructed
+them from saved artifacts.
+
 ### Re-reporting without re-running
 
 Every run's verdicts and metrics are saved to `results.jsonl`, so the summary can
 be regenerated from those artifacts without building, provisioning, or invoking
-vally again. Pass `-ReportOnly` (offline, free, and instant) to re-read the newest
-run per experiment from `--output-dir`:
+vally again. Pass `-ReportOnly` (offline, free, and instant) to re-read the
+**newest run directory** under `--output-dir`:
 
 ```powershell
-# Re-print the summary from the last run's artifacts
+# Re-print the summary from the last run's artifacts (auto-discovers the newest
+# run directory under --output-dir, and prints which one it read)
 ./Invoke-VallyEval.ps1 -ReportOnly
 
-# Combine with -Area/-Tool to focus, and -Iterations to report the newest N runs
+# Combine with -Area/-Tool to focus, and -Iterations to report the newest N
+# iteration(s) recorded WITHIN that run directory for each tool
 ./Invoke-VallyEval.ps1 -ReportOnly -Tool eventhub-get -Iterations 3
 
-# Report from an archived/copied results tree instead of --output-dir (implies -ReportOnly)
-./Invoke-VallyEval.ps1 -ReportFrom ./some-saved-results
+# Report from a SPECIFIC run directory instead of the newest one (e.g. an older
+# run, or one copied/archived elsewhere) - implies -ReportOnly
+./Invoke-VallyEval.ps1 -ReportFrom ./.vally-results/2026-07-29T18-19-30-496Z
 ```
 
 `-ReportOnly` honors the same `-Area`/`-Tool` filters, and `-Iterations <n>`
-selects how many of the newest timestamped runs per tool to report (oldest-first,
-so iteration numbers read chronologically). The vally exit code isn't persisted in
+selects how many of the newest timestamped iterations, within the selected run
+directory, to report per tool (oldest-first, so iteration numbers read
+chronologically). The vally exit code isn't persisted in
 the artifacts, so report-only relies on the per-stimulus verdicts in each
 `results.jsonl`; the process still exits non-zero if a candidate stimulus failed
 or an effectiveness **REGRESSION** is detected. This is handy for re-examining or

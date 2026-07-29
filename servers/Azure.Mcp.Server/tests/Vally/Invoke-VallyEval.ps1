@@ -28,7 +28,9 @@ This is a wrapper around the vally CLI (https://microsoft.github.io/vally) that:
      CANDIDATES. The delta between each candidate and the baseline isolates the
      Azure MCP server's contribution in that mode.
      Each experiment is run -Iterations time(s) (default 1); the results summary
-     reports the outcome of every iteration.
+     reports the outcome of every iteration, followed by a consolidated,
+     by-tool summary that folds all iterations together and names the
+     best-performing candidate variant (and its aggregated metrics) per tool.
 
 Layout / naming convention (discovered automatically):
 
@@ -53,10 +55,21 @@ candidate can return real data and the comparison is meaningful. The script's ex
 code is non-zero if any experiment fails to run or a candidate stimulus fails;
 baseline failures are expected and do not affect it.
 
-Pass -ReportOnly (or -ReportFrom <dir>) to skip building, provisioning, and
-running vally entirely, and instead regenerate the summary from run artifacts a
-previous run already saved under -OutputDir (or -ReportFrom). This is fast,
-offline, and free - handy for re-examining or debugging a prior run's results.
+Every invocation of this script writes ALL of its output under one fresh,
+timestamped run directory: '<OutputDir>/<run-timestamp>/<area>/<tool>/...'. That
+keeps everything a single invocation produces - every discovered area/tool, and
+every -Iterations repeat of each - together and unambiguous, rather than
+scattered across independent per-tool timestamps with no shared "this is one
+run" grouping.
+
+Pass -ReportOnly to skip building, provisioning, and running vally entirely, and
+instead regenerate the summary from the newest run directory already saved under
+-OutputDir - the script prints which run directory it read. Pass -ReportFrom
+<run-directory> to report from a SPECIFIC run directory instead (e.g. an older
+run, or one copied/archived elsewhere); -ReportFrom implies -ReportOnly. Both are
+fast, offline, and free - handy for re-examining or debugging a prior run's
+results, or for iterating on this script's own post-processing/reporting logic
+without re-running the (slow, Azure-touching) evaluations.
 
 .PARAMETER ExperimentSpec
 Optional path to a single experiment spec (<tool>.experiment.yaml) to run instead
@@ -70,9 +83,11 @@ plus an aggregate pass count. Useful for surfacing non-deterministic (flaky)
 results. Must be 1 or greater.
 
 .PARAMETER OutputDir
-Parent directory where vally writes its run artifacts. Each experiment's runs go
-to an '<area>/<tool>' subdirectory, under which `vally experiment run` creates a
-timestamped folder with one subfolder per variant (baseline, namespace,
+Parent directory under which each invocation of this script writes a fresh,
+timestamped run directory (e.g. '2026-07-29T18-19-30-496Z'). Every area/tool this
+invocation discovers goes to an '<run-timestamp>/<area>/<tool>' subdirectory,
+under which `vally experiment run` creates one further timestamped folder per
+-Iterations repeat, each with one subfolder per variant (baseline, namespace,
 consolidated). Defaults to ./.vally-results next to this script.
 
 .PARAMETER PreEvalScript
@@ -120,17 +135,21 @@ Skip building the server. Use this when azmcp is already built and on PATH.
 
 .PARAMETER ReportOnly
 Skip building, provisioning, and running vally; instead reconstruct the results
-summary from artifacts a previous run saved under -OutputDir (or -ReportFrom). The
+summary from artifacts already saved under -OutputDir. Without -ReportFrom, reads
+the newest run directory under -OutputDir (the script prints which one). The
 -Area/-Tool filters and -Iterations still apply: -Iterations selects how many of
-the newest timestamped run(s) per tool to report (default 1). Because the vally
-exit code is not persisted in the artifacts, the summary relies on the per-stimulus
-verdicts in each run's results.jsonl; the process still exits non-zero if a
-candidate stimulus failed or an effectiveness regression is detected.
+the newest timestamped iteration folder(s) per tool, WITHIN that one run
+directory, to report (default 1). Because the vally exit code is not persisted in
+the artifacts, the summary relies on the per-stimulus verdicts in each run's
+results.jsonl; the process still exits non-zero if a candidate stimulus failed or
+an effectiveness regression is detected.
 
 .PARAMETER ReportFrom
-Optional path to a results tree to report from (its '<area>/<tool>/<timestamp>'
-layout must match what a run produces). Implies -ReportOnly. Use it to re-report an
-archived or copied set of artifacts without overwriting -OutputDir.
+Optional path to a SPECIFIC run directory to report from (its
+'<area>/<tool>/<timestamp>' layout must match what a single invocation of this
+script produces under -OutputDir) instead of auto-discovering the newest one.
+Implies -ReportOnly. Use it to re-report an older run, or an archived/copied run
+directory.
 
 .PARAMETER Verbose
 Enables this script's own verbose logging (standard PowerShell common parameter).
@@ -169,6 +188,10 @@ full agent output is not available through the experiment runner.
 .EXAMPLE
 # Report all three iterations of a prior run for a single tool
 ./Invoke-VallyEval.ps1 -ReportOnly -Tool eventhub-get -Iterations 3
+
+.EXAMPLE
+# Report from a specific, older run directory instead of the newest one
+./Invoke-VallyEval.ps1 -ReportFrom ./.vally-results/2026-07-29T18-19-30-496Z
 #>
 
 [CmdletBinding()]
@@ -191,13 +214,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# -ReportFrom names an alternate artifacts tree to report from, and implies
-# -ReportOnly. Both are convenience switches for regenerating the summary from a
-# previous run without building, provisioning, or invoking vally.
-if ($ReportFrom) {
-    $ReportOnly = $true
-    $OutputDir = $ReportFrom
-}
+# -ReportFrom names a specific run directory to report from and implies
+# -ReportOnly; it does NOT replace -OutputDir (which may contain many run
+# directories) - see the "Resolve the run directory" section below.
+if ($ReportFrom) { $ReportOnly = $true }
 
 # vally emits UTF-8 (box-drawing rules, check marks, etc.). If the console is on a
 # legacy OEM code page (e.g. 437), those bytes are decoded wrong and show up as
@@ -212,6 +232,48 @@ $ServerProject = Join-Path $RepoRoot 'servers' 'Azure.Mcp.Server' 'src' 'Azure.M
 
 function Write-Info($Message) { Write-Host "[vally-eval] $Message" -ForegroundColor Cyan }
 function Write-Warn($Message) { Write-Host "[vally-eval] $Message" -ForegroundColor Yellow }
+
+# --- Resolve the run directory ------------------------------------------------
+# Every invocation of this script groups ALL of its output under one top-level,
+# timestamped run directory: <OutputDir>/<run-timestamp>/<area>/<tool>/... This
+# keeps everything a single invocation produces - every discovered area/tool,
+# and every -Iterations repeat of each - together and unambiguous, rather than
+# scattered across independent per-tool timestamps with no shared "this is one
+# run" grouping.
+#
+# -ReportOnly (without -ReportFrom) reports from the newest such run directory
+# found under -OutputDir. -ReportFrom names a SPECIFIC run directory to report
+# from instead (e.g. an older run, or one copied/archived elsewhere).
+$RunDirTimestampPattern = '^\d{4}-\d{2}-\d{2}T'
+if ($ReportOnly) {
+    if ($ReportFrom) {
+        $resolvedRunDir = Resolve-Path -Path $ReportFrom -ErrorAction SilentlyContinue
+        if (-not $resolvedRunDir) { throw "-ReportFrom run directory not found: $ReportFrom" }
+        $RunDir = $resolvedRunDir.Path
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $OutputDir)) {
+            throw "No run artifacts found under '$OutputDir'. Run without -ReportOnly first, or pass -ReportFrom <run-directory>."
+        }
+        $newestRunDir = Get-ChildItem -Path $OutputDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $RunDirTimestampPattern } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+        if (-not $newestRunDir) {
+            throw "No timestamped run directories found under '$OutputDir'. Run without -ReportOnly first, or pass -ReportFrom <run-directory>."
+        }
+        $RunDir = $newestRunDir.FullName
+    }
+    Write-Info "Report-only: reporting from run directory: $RunDir"
+}
+else {
+    # A fresh run directory for this invocation, named with a sortable UTC
+    # timestamp matching vally's own style (e.g. 2026-07-29T18-19-30-496Z) so it
+    # sorts chronologically alongside vally's own per-iteration timestamp
+    # folders nested beneath each tool's directory.
+    $RunDir = Join-Path $OutputDir ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH-mm-ss-fffZ'))
+    Write-Info "Run directory for this invocation: $RunDir"
+}
 
 # Report-only mode reconstructs the summary from saved artifacts, so it needs
 # neither the vally CLI, a build, nor the azmcp binary on PATH. Skip all of that
@@ -323,15 +385,18 @@ function Format-Ms {
 
 # Formats a candidate-vs-baseline delta (lower is better) as e.g. "+12343 (+28%)"
 # or "-2.8s (-9%)". A negative value means the candidate used less - i.e. better.
+# -Decimals formats the raw (non-seconds) delta with that many decimal places -
+# used for AI Credits, which are typically fractional.
 function Format-Delta {
     param(
-        [Parameter(Mandatory)] [int] $Candidate,
-        [Parameter(Mandatory)] [int] $Baseline,
-        [switch] $AsSeconds
+        [Parameter(Mandatory)] [double] $Candidate,
+        [Parameter(Mandatory)] [double] $Baseline,
+        [switch] $AsSeconds,
+        [int] $Decimals = 0
     )
     $delta = $Candidate - $Baseline
     $sign = ($delta -gt 0) ? '+' : ''
-    $body = $AsSeconds ? ('{0}{1:0.0}s' -f $sign, ($delta / 1000.0)) : ('{0}{1}' -f $sign, $delta)
+    $body = $AsSeconds ? ('{0}{1:0.0}s' -f $sign, ($delta / 1000.0)) : ('{0}{1}' -f $sign, [math]::Round($delta, $Decimals))
     if ($Baseline -ne 0) {
         $pct = [math]::Round(($delta / [double] $Baseline) * 100)
         $body += ' ({0}{1}%)' -f (($pct -gt 0) ? '+' : ''), $pct
@@ -365,10 +430,37 @@ function ConvertTo-MetricInt {
     return [int] $sum
 }
 
+# nano-aiu -> AI Credits. vally reports token usage cost in "nano-aiu" units
+# (metrics.tokenUsage.cost.{provider,unit,amount}); 1 AI Credit is 1e9 nano-aiu.
+$script:NanoAiuPerCredit = 1000000000.0
+
+# Coerces vally's token-usage cost (metrics.tokenUsage.cost.amount, in
+# nano-aiu) into AI Credits, summing across trials the same way
+# ConvertTo-MetricInt does for the other metrics. Cost is omitted by vally
+# whenever the source didn't report a complete, consistently-provider/unit
+# cost, so missing/non-numeric values simply contribute nothing.
+function ConvertTo-AiCredits {
+    param($Value)
+
+    $sum = 0.0
+    foreach ($item in @($Value)) {
+        if ($null -eq $item) { continue }
+        $parsed = 0.0
+        if ([double]::TryParse(
+                [string] $item,
+                [System.Globalization.NumberStyles]::Any,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref] $parsed)) {
+            $sum += $parsed
+        }
+    }
+    return $sum / $script:NanoAiuPerCredit
+}
+
 # Reads vally's machine-readable results.jsonl for a completed run and returns an
 # ordered hashtable keyed by stimulus name, each value carrying the per-stimulus
 # verdict and the efficiency metrics the comparison needs (tokens, turns, wall
-# time). Returns $null when no results file is present.
+# time, AI credits). Returns $null when no results file is present.
 function Get-VallyStimulusResults {
     param([Parameter(Mandatory)] [string] $RunOutputDir)
 
@@ -413,6 +505,10 @@ function Get-VallyStimulusResults {
         $tokenCount = ConvertTo-MetricInt $metrics.tokenUsage.totalTokens
         $turnCount = ConvertTo-MetricInt $metrics.turnCount
         $wallTimeMs = ConvertTo-MetricInt $metrics.wallTimeMs
+        # metrics.tokenUsage.cost.amount is reported in nano-aiu; convert to AI
+        # Credits. Omitted (and so $null / not-a-number) whenever vally could not
+        # establish a complete, consistently-provider/unit cost for the trial.
+        $aiCredits = ConvertTo-AiCredits $metrics.tokenUsage.cost.amount
 
         $byStimulus[[string] $record.stimulus] = [pscustomobject]@{
             Stimulus        = [string] $record.stimulus
@@ -420,6 +516,7 @@ function Get-VallyStimulusResults {
             TotalTokens     = $tokenCount
             TurnCount       = $turnCount
             WallTimeMs      = $wallTimeMs
+            AiCredits       = $aiCredits
             FailedGraders   = $failedGraders
             FailureEvidence = $failureEvidence
         }
@@ -431,9 +528,13 @@ function Get-VallyStimulusResults {
 # server, in a given mode) against the baseline (WITHOUT it). This encodes the
 # effectiveness criteria: the server is VALUABLE when it enables an outcome the
 # baseline could not achieve; it is a REGRESSION when the baseline succeeds
-# without it but the candidate fails; when BOTH PASS the tool was not required
-# for the outcome and efficiency (tokens/turns/wall time, lower is better)
-# decides; INCONCLUSIVE when neither succeeds.
+# without it but the candidate fails; when this candidate AND the baseline both
+# pass, the tool was not required for the outcome and efficiency (tokens/turns/
+# wall time/AI credits, lower is better) decides; INCONCLUSIVE when neither
+# succeeds. Returns 'PASS (baseline also passed)' rather than a bare 'BOTH
+# PASS' because each candidate variant (e.g. namespace, consolidated) is
+# reported against the shared baseline individually - with 3+ variants on
+# screen at once, "BOTH" alone doesn't say which two are meant.
 function Get-EffectivenessCategory {
     param($Candidate, $Baseline)
 
@@ -442,28 +543,33 @@ function Get-EffectivenessCategory {
     if ($Candidate.Passed -and -not $Baseline.Passed) { return 'VALUABLE' }
     if (-not $Candidate.Passed -and $Baseline.Passed) { return 'REGRESSION' }
     if (-not $Candidate.Passed -and -not $Baseline.Passed) { return 'INCONCLUSIVE' }
-    return 'BOTH PASS'
+    return 'PASS (baseline also passed)'
 }
 
 # When both a candidate and the baseline pass, decides which is more efficient
-# using the three lower-is-better metrics, returning a short human-readable
-# judgment.
+# using the four lower-is-better metrics, returning a short human-readable
+# judgment. CandidateLabel/BaselineLabel identify which side is which in the
+# returned text (e.g. "namespace"/"consolidated" or "candidate"/"baseline"),
+# since callers compare different pairings (a variant vs the shared baseline,
+# or one variant vs another) and a generic "candidate"/"baseline" wording would
+# be ambiguous in the latter case.
 function Get-EfficiencyJudgment {
-    param($Candidate, $Baseline)
+    param($Candidate, $Baseline, [string] $CandidateLabel = 'candidate', [string] $BaselineLabel = 'baseline')
 
     $wins = 0
     $losses = 0
     foreach ($pair in @(
             , @($Candidate.TotalTokens, $Baseline.TotalTokens)
             , @($Candidate.TurnCount, $Baseline.TurnCount)
-            , @($Candidate.WallTimeMs, $Baseline.WallTimeMs))) {
+            , @($Candidate.WallTimeMs, $Baseline.WallTimeMs)
+            , @($Candidate.AiCredits, $Baseline.AiCredits))) {
         if ($pair[0] -lt $pair[1]) { $wins++ }
         elseif ($pair[0] -gt $pair[1]) { $losses++ }
     }
-    if ($wins -gt 0 -and $losses -eq 0) { return "candidate more efficient (better on $wins/3 metrics)" }
-    if ($losses -gt 0 -and $wins -eq 0) { return "candidate less efficient (worse on $losses/3 metrics)" }
+    if ($wins -gt 0 -and $losses -eq 0) { return "$CandidateLabel more efficient than $BaselineLabel (better on $wins/4 metrics)" }
+    if ($losses -gt 0 -and $wins -eq 0) { return "$CandidateLabel less efficient than $BaselineLabel (worse on $losses/4 metrics)" }
     if ($wins -eq 0 -and $losses -eq 0) { return 'equivalent efficiency' }
-    return "mixed (candidate better on $wins, worse on $losses)"
+    return "mixed ($CandidateLabel better on $wins, worse on $losses)"
 }
 
 # Picks the console color that reflects an effectiveness category / judgment.
@@ -473,8 +579,8 @@ function Get-VerdictColor {
         'VALUABLE' { return 'Green' }
         'REGRESSION' { return 'Red' }
         'INCONCLUSIVE' { return 'Red' }
-        'BOTH PASS' {
-            if ($Judgment -like 'candidate more efficient*' -or $Judgment -like 'equivalent*') { return 'Green' }
+        'PASS (baseline also passed)' {
+            if ($Judgment -like '* more efficient*' -or $Judgment -like 'equivalent*') { return 'Green' }
             return 'Yellow'
         }
         'PASS*' { return 'Green' }
@@ -530,16 +636,17 @@ function Write-CandidateComparison {
 
         $detail = ''
         $judgment = $null
-        if ($category -eq 'BOTH PASS') {
-            $judgment = Get-EfficiencyJudgment -Candidate $c -Baseline $b
+        if ($category -eq 'PASS (baseline also passed)') {
+            $judgment = Get-EfficiencyJudgment -Candidate $c -Baseline $b -CandidateLabel $CandidateName -BaselineLabel 'baseline'
             $detail = " - $judgment; " +
-            ("tokens {0} vs {1} ({2}), turns {3} vs {4} ({5}), wall {6} vs {7} ({8})" -f `
+            ("tokens {0} vs {1} ({2}), turns {3} vs {4} ({5}), wall {6} vs {7} ({8}), credits {9} vs {10} ({11})" -f `
                 $c.TotalTokens, $b.TotalTokens, (Format-Delta -Candidate $c.TotalTokens -Baseline $b.TotalTokens),
             $c.TurnCount, $b.TurnCount, (Format-Delta -Candidate $c.TurnCount -Baseline $b.TurnCount),
-            (Format-Ms $c.WallTimeMs), (Format-Ms $b.WallTimeMs), (Format-Delta -Candidate $c.WallTimeMs -Baseline $b.WallTimeMs -AsSeconds))
+            (Format-Ms $c.WallTimeMs), (Format-Ms $b.WallTimeMs), (Format-Delta -Candidate $c.WallTimeMs -Baseline $b.WallTimeMs -AsSeconds),
+            ('{0:0.00}' -f $c.AiCredits), ('{0:0.00}' -f $b.AiCredits), (Format-Delta -Candidate $c.AiCredits -Baseline $b.AiCredits -Decimals 2))
             # Both passing means the outcome did not require the server - surface it,
             # but it does not fail the run.
-            if ($judgment -like 'candidate less efficient*' -or $judgment -like 'mixed*') {
+            if ($judgment -like '* less efficient*' -or $judgment -like 'mixed*') {
                 $detail += ' [review: server did not improve efficiency]'
             }
         }
@@ -637,10 +744,57 @@ function Write-ExperimentIterationReport {
         if ($outcome.Failure) { $failure = $true }
     }
 
+    Write-NamespaceVsConsolidatedComparison `
+        -CandidateStimuli $candidateStimuli `
+        -BaselineStimuli $baselineStimuli
+
     return [pscustomobject]@{
         Failure           = $failure
         CandidateVerdicts = $candidateVerdicts
         BaselineVerdict   = $baselineVerdict
+    }
+}
+
+# When BOTH the 'namespace' and 'consolidated' candidates are individually
+# VALUABLE for a given stimulus (i.e. each enabled an outcome the baseline
+# could not achieve), the two candidates' PASS/FAIL against the baseline tells
+# us nothing about which server MODE is preferable. In that case, additionally
+# report the relative difference between the two candidates themselves (lower
+# is better) across the same four efficiency metrics used for candidate-vs-
+# baseline comparisons, so both server modes' results stay visible alongside
+# the head-to-head delta. Silently does nothing when either variant is
+# missing, has no results for a stimulus, or was not VALUABLE for it.
+function Write-NamespaceVsConsolidatedComparison {
+    param(
+        [Parameter(Mandatory)] $CandidateStimuli,
+        $BaselineStimuli
+    )
+
+    $namespaceStimuli = $CandidateStimuli['namespace']
+    $consolidatedStimuli = $CandidateStimuli['consolidated']
+    if (-not $namespaceStimuli -or -not $consolidatedStimuli) { return }
+
+    $stimuli = @($namespaceStimuli.Keys | Where-Object { $consolidatedStimuli.Contains($_) })
+    foreach ($stimulus in $stimuli) {
+        $ns = $namespaceStimuli[$stimulus]
+        $co = $consolidatedStimuli[$stimulus]
+        $baseline = $BaselineStimuli ? $BaselineStimuli[$stimulus] : $null
+
+        $nsCategory = Get-EffectivenessCategory -Candidate $ns -Baseline $baseline
+        $coCategory = Get-EffectivenessCategory -Candidate $co -Baseline $baseline
+        if ($nsCategory -ne 'VALUABLE' -or $coCategory -ne 'VALUABLE') { continue }
+
+        # Both modes are individually valuable - report each mode's result plus
+        # the relative (namespace-vs-consolidated) difference, lower is better.
+        $judgment = Get-EfficiencyJudgment -Candidate $ns -Baseline $co -CandidateLabel 'namespace' -BaselineLabel 'consolidated'
+        $detail = "namespace vs consolidated - $judgment; " +
+        ("tokens {0} vs {1} ({2}), turns {3} vs {4} ({5}), wall {6} vs {7} ({8}), credits {9} vs {10} ({11})" -f `
+            $ns.TotalTokens, $co.TotalTokens, (Format-Delta -Candidate $ns.TotalTokens -Baseline $co.TotalTokens),
+        $ns.TurnCount, $co.TurnCount, (Format-Delta -Candidate $ns.TurnCount -Baseline $co.TurnCount),
+        (Format-Ms $ns.WallTimeMs), (Format-Ms $co.WallTimeMs), (Format-Delta -Candidate $ns.WallTimeMs -Baseline $co.WallTimeMs -AsSeconds),
+        ('{0:0.00}' -f $ns.AiCredits), ('{0:0.00}' -f $co.AiCredits), (Format-Delta -Candidate $ns.AiCredits -Baseline $co.AiCredits -Decimals 2))
+
+        Write-Host ("    - {0,-30} NAMESPACE+CONSOLIDATED BOTH VALUABLE - {1}" -f $stimulus, $detail) -ForegroundColor Cyan
     }
 }
 
@@ -779,7 +933,7 @@ function Get-ExperimentResultsFromRuns {
             if ($provisioned) {
                 foreach ($eval in $areaGroup.Group) {
                     $label = "$($eval.Area)/$($eval.Tool)"
-                    $runRoot = Join-Path (Join-Path $OutputDir $eval.Area) $eval.Tool
+                    $runRoot = Join-Path (Join-Path $RunDir $eval.Area) $eval.Tool
 
                     # Run the experiment -Iterations time(s). Each run produces every
                     # variant (baseline + the server candidates) under its own
@@ -834,13 +988,14 @@ function Get-ExperimentResultsFromRuns {
 }
 
 # Reconstructs the same per-experiment result descriptors from artifacts a
-# previous run already saved under -OutputDir, WITHOUT building, provisioning, or
-# invoking vally. For each discovered experiment it takes the newest -Iterations
-# timestamped run directory(ies) under <OutputDir>/<area>/<tool>/ and splits each
-# into its baseline and candidate (server mode) variant subfolders. The vally
-# exit code is not persisted in the artifacts, so ExperimentExit is reported as 0
-# and the summary relies on the per-stimulus verdicts recorded in each run's
-# results.jsonl.
+# previous run already saved under the resolved -RunDir (the newest run under
+# -OutputDir, or the specific run named by -ReportFrom), WITHOUT building,
+# provisioning, or invoking vally. For each discovered experiment it takes the
+# newest -Iterations timestamped run directory(ies) under
+# <RunDir>/<area>/<tool>/ and splits each into its baseline and candidate
+# (server mode) variant subfolders. The vally exit code is not persisted in the
+# artifacts, so ExperimentExit is reported as 0 and the summary relies on the
+# per-stimulus verdicts recorded in each run's results.jsonl.
 function Get-ExperimentResultsFromArtifacts {
     param([Parameter(Mandatory)] $Evals)
 
@@ -848,7 +1003,7 @@ function Get-ExperimentResultsFromArtifacts {
 
     foreach ($eval in $Evals) {
         $label = "$($eval.Area)/$($eval.Tool)"
-        $runRoot = Join-Path (Join-Path $OutputDir $eval.Area) $eval.Tool
+        $runRoot = Join-Path (Join-Path $RunDir $eval.Area) $eval.Tool
 
         if (-not (Test-Path -LiteralPath $runRoot)) {
             Write-Warn "[$label] No artifacts under '$runRoot' (nothing to report)."
@@ -873,9 +1028,13 @@ function Get-ExperimentResultsFromArtifacts {
 
         $iterationResults = [System.Collections.Generic.List[object]]::new()
         $i = 0
-        foreach ($runDir in $runDirs) {
+        # NOTE: do not name this loop variable $runDir/$RunDir - PowerShell
+        # variable names are case-insensitive, so that would silently clobber
+        # the script-scope $RunDir used above (and by later iterations of the
+        # outer $Evals loop) to compute $runRoot for each tool.
+        foreach ($iterationRunDir in $runDirs) {
             $i++
-            $variantDirs = Get-RunVariantDirs -RunDir $runDir.FullName
+            $variantDirs = Get-RunVariantDirs -RunDir $iterationRunDir.FullName
             $iterationResults.Add([pscustomobject]@{
                     Iteration      = $i
                     ExperimentExit = 0
@@ -902,7 +1061,8 @@ function Get-ExperimentResultsFromArtifacts {
 #   * baseline FAIL + candidate PASS -> VALUABLE      (the server enabled the outcome)
 #   * baseline PASS + candidate FAIL -> REGRESSION    (the server hurt the outcome)
 #   * both PASS                      -> the tool was not required; efficiency decides,
-#                                        using tokens / turns / wall time (lower is better)
+#                                        using tokens / turns / wall time / AI credits
+#                                        (lower is better)
 #   * neither PASS                   -> INCONCLUSIVE
 #
 # A result fails the run only when the experiment itself failed to execute, a
@@ -957,9 +1117,176 @@ function Write-ResultsSummary {
             }
         }
     }
-    Write-Info "Artifacts under: $OutputDir"
+    Write-Info "Run directory: $RunDir"
 
     return $anyFailure
+}
+
+# Aggregates one variant's (baseline or a named candidate) per-stimulus metrics
+# across every iteration of a single tool's results, collapsing all
+# iteration/stimulus trials for that variant into one set of summary statistics.
+# This is what lets the consolidated report account for multiple -Iterations:
+# each trial (one stimulus in one iteration) contributes equally to the
+# average, and PassRate is the fraction of all those trials that passed.
+# Returns $null when the variant has no results in any iteration (e.g. an
+# experiment that only ran a subset of variants, or missing artifacts).
+function Get-VariantAggregateMetrics {
+    param(
+        [Parameter(Mandatory)] $IterationsList,
+        [Parameter(Mandatory)] [string] $VariantName
+    )
+
+    $totalTokens = 0.0
+    $totalTurns = 0.0
+    $totalWallMs = 0.0
+    $totalCredits = 0.0
+    $passCount = 0
+    $trialCount = 0
+
+    foreach ($iteration in $IterationsList) {
+        $dir = ($VariantName -ieq $BaselineVariantName) ? $iteration.BaselineDir : $iteration.CandidateDirs[$VariantName]
+        if (-not $dir) { continue }
+
+        $stimuli = Get-VallyStimulusResults -RunOutputDir $dir
+        if (-not $stimuli) { continue }
+
+        foreach ($stimulusResult in $stimuli.Values) {
+            $trialCount++
+            if ($stimulusResult.Passed) { $passCount++ }
+            $totalTokens += $stimulusResult.TotalTokens
+            $totalTurns += $stimulusResult.TurnCount
+            $totalWallMs += $stimulusResult.WallTimeMs
+            $totalCredits += $stimulusResult.AiCredits
+        }
+    }
+
+    if ($trialCount -eq 0) { return $null }
+
+    return [pscustomobject]@{
+        Variant       = $VariantName
+        TrialCount    = $trialCount
+        PassCount     = $passCount
+        PassRate      = $passCount / [double] $trialCount
+        AvgTokens     = $totalTokens / $trialCount
+        AvgTurnCount  = $totalTurns / $trialCount
+        AvgWallTimeMs = $totalWallMs / $trialCount
+        AvgAiCredits  = $totalCredits / $trialCount
+    }
+}
+
+# Returns every variant name (the shared 'baseline' plus each candidate, e.g.
+# 'namespace'/'consolidated') that appears in ANY iteration of a tool's results,
+# in first-seen order. Iterations can in principle vary in which variants
+# produced results (e.g. a candidate crashed in one iteration), so this unions
+# across all of them rather than trusting only the first iteration.
+function Get-AllVariantNames {
+    param([Parameter(Mandatory)] $IterationsList)
+
+    $names = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($iteration in $IterationsList) {
+        if ($iteration.BaselineDir -and -not $seen.ContainsKey($BaselineVariantName)) {
+            $names.Add($BaselineVariantName)
+            $seen[$BaselineVariantName] = $true
+        }
+        foreach ($candidateName in $iteration.CandidateDirs.Keys) {
+            if (-not $seen.ContainsKey($candidateName)) {
+                $names.Add($candidateName)
+                $seen[$candidateName] = $true
+            }
+        }
+    }
+    return $names
+}
+
+# Picks the best-performing entry from a list of Get-VariantAggregateMetrics
+# results: highest PassRate wins first (a variant that achieves the outcome
+# more often is "better" regardless of efficiency), and ties are broken by the
+# lower-is-better efficiency metrics in order (tokens, then turns, then wall
+# time, then AI credits) - the same metric priority Get-EfficiencyJudgment uses
+# for candidate-vs-baseline comparisons.
+function Get-BestVariantMetrics {
+    param([Parameter(Mandatory)] $MetricsList)
+
+    return @($MetricsList) |
+    Sort-Object -Property `
+    @{ Expression = 'PassRate'; Descending = $true }, `
+        'AvgTokens', 'AvgTurnCount', 'AvgWallTimeMs', 'AvgAiCredits' |
+    Select-Object -First 1
+}
+
+# Formats one variant's aggregated metrics as a compact one-line summary, e.g.
+# "namespace       pass 27/28 (96%) | avg tokens 118,432, avg turns 6.5, avg wall 34.2s, avg credits 21.07".
+function Format-VariantMetricsLine {
+    param([Parameter(Mandatory)] $Metrics)
+
+    $passPct = [math]::Round($Metrics.PassRate * 100)
+    return ("pass {0}/{1} ({2}%) | avg tokens {3}, avg turns {4:0.0}, avg wall {5}, avg credits {6:0.00}" -f `
+            $Metrics.PassCount, $Metrics.TrialCount, $passPct,
+        ('{0:N0}' -f $Metrics.AvgTokens), $Metrics.AvgTurnCount, (Format-Ms $Metrics.AvgWallTimeMs), $Metrics.AvgAiCredits)
+}
+
+# Prints the consolidated, by-tool report: one line per tool naming the
+# best-performing CANDIDATE variant (namespace/consolidated/etc. - the shared
+# baseline is excluded from "best", since it is the server-less control, not a
+# choice between server modes) and its aggregated metrics, followed by the
+# other candidates (and the baseline, for reference) so the full comparison
+# stays visible. All metrics are aggregated across every iteration and
+# stimulus recorded for that tool, so a multi-iteration run (-Iterations > 1)
+# is correctly folded into one set of per-variant statistics rather than
+# reported per iteration.
+function Write-ConsolidatedSummary {
+    param([Parameter(Mandatory)] $Results)
+
+    Write-Host ''
+    Write-Info '================= Consolidated Summary (by tool) ================='
+
+    foreach ($r in $Results) {
+        if ($r.ProvisioningFailed) {
+            Write-Warn ("{0,-32} PROVISIONING FAILED - excluded from consolidated summary" -f $r.Name)
+            continue
+        }
+
+        $iterations = @($r.Iterations)
+        if ($iterations.Count -eq 0) {
+            Write-Warn ("{0,-32} (no iterations recorded - excluded from consolidated summary)" -f $r.Name)
+            continue
+        }
+
+        $variantNames = Get-AllVariantNames -IterationsList $iterations
+        $metricsByVariant = [ordered]@{}
+        foreach ($variantName in $variantNames) {
+            $metrics = Get-VariantAggregateMetrics -IterationsList $iterations -VariantName $variantName
+            if ($metrics) { $metricsByVariant[$variantName] = $metrics }
+        }
+
+        if ($metricsByVariant.Count -eq 0) {
+            Write-Warn ("{0,-32} (no variant results found - excluded from consolidated summary)" -f $r.Name)
+            continue
+        }
+
+        $iterationNote = $iterations.Count -gt 1 ? (" ({0} iterations)" -f $iterations.Count) : ''
+        Write-Host ("{0,-32}{1}" -f $r.Name, $iterationNote) -ForegroundColor Cyan
+
+        $candidateMetrics = @($metricsByVariant.Keys | Where-Object { $_ -ine $BaselineVariantName } | ForEach-Object { $metricsByVariant[$_] })
+        if ($candidateMetrics.Count -gt 0) {
+            $best = Get-BestVariantMetrics -MetricsList $candidateMetrics
+            Write-Host ("  best: {0,-14} {1}" -f $best.Variant, (Format-VariantMetricsLine -Metrics $best)) -ForegroundColor Green
+
+            foreach ($variantName in ($candidateMetrics | Where-Object { $_.Variant -ne $best.Variant } | ForEach-Object { $_.Variant })) {
+                $m = $metricsByVariant[$variantName]
+                Write-Host ("  {0,-19} {1}" -f $variantName, (Format-VariantMetricsLine -Metrics $m)) -ForegroundColor Gray
+            }
+        }
+        else {
+            Write-Warn '  (no candidate variants found - only the baseline reported results)'
+        }
+
+        if ($metricsByVariant.Contains($BaselineVariantName)) {
+            $b = $metricsByVariant[$BaselineVariantName]
+            Write-Host ("  {0,-19} {1}" -f $BaselineVariantName, (Format-VariantMetricsLine -Metrics $b)) -ForegroundColor DarkGray
+        }
+    }
 }
 
 # --- Discover the experiments to run -----------------------------------------
@@ -1026,7 +1353,7 @@ $evals = foreach ($spec in $experimentFiles) {
 
 Write-Info ("Discovered {0} experiment(s): {1}" -f $evals.Count, (($evals | ForEach-Object { "$($_.Area)/$($_.Tool)" }) -join ', '))
 if ($ReportOnly) {
-    Write-Info ("Report-only: reading the newest {0} run(s) per experiment from $OutputDir." -f $Iterations)
+    Write-Info ("Report-only: reading the newest {0} iteration(s) per experiment from $RunDir." -f $Iterations)
 }
 elseif ($Iterations -gt 1) {
     Write-Info "Running each experiment $Iterations times."
@@ -1039,7 +1366,7 @@ elseif ($Iterations -gt 1) {
 if ($ReportOnly) {
     $results = Get-ExperimentResultsFromArtifacts -Evals $evals
     if (@($results).Count -eq 0) {
-        throw "No run artifacts found under '$OutputDir' for the requested experiments. Run without -ReportOnly first, or pass -ReportFrom <dir>."
+        throw "No run artifacts found under '$RunDir' for the requested experiments. Run without -ReportOnly first, or pass -ReportFrom <run-directory>."
     }
 }
 else {
@@ -1054,7 +1381,8 @@ else {
 #   * baseline FAIL + candidate PASS -> VALUABLE      (the server enabled the outcome)
 #   * baseline PASS + candidate FAIL -> REGRESSION    (the server hurt the outcome)
 #   * both PASS                      -> the tool was not required; efficiency decides,
-#                                        using tokens / turns / wall time (lower is better)
+#                                        using tokens / turns / wall time / AI credits
+#                                        (lower is better)
 #   * neither PASS                   -> INCONCLUSIVE
 #
 # A run is only considered failed (non-zero exit) when the experiment itself
@@ -1062,6 +1390,13 @@ else {
 # is detected. Baseline outcome failures are expected and do not fail the run.
 # Returns $true if any such failure was detected across all experiments.
 $anyFailure = Write-ResultsSummary -Results $results
+
+# --- Consolidated, by-tool summary -------------------------------------------
+# On top of the per-iteration comparison above, print one aggregated line per
+# tool naming its best-performing candidate variant and that variant's metrics,
+# with metrics folded across every iteration and stimulus (not just the latest
+# one), so a multi-iteration run is represented by one clear verdict per tool.
+Write-ConsolidatedSummary -Results $results
 
 # Non-zero if any experiment failed to run, any candidate stimulus failed, any
 # area's provisioning failed, or an effectiveness regression (baseline PASS while

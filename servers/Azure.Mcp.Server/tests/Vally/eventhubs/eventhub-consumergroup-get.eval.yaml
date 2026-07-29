@@ -89,7 +89,7 @@ stimuli:
   - name: list-consumer-groups-in-event-hub
     prompt: |
       List all consumer groups in my event hub "orders" in namespace
-      "contoso-ehns".
+      "contoso-ehns" and resource group "contoso-rg".
     # Rubric for the outcome LLM judge, applied identically to both variants.
     rubric:
       - "The response contains the actual list of consumer groups for the 'orders' event hub, retrieved from Azure."
